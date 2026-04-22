@@ -46,16 +46,17 @@ with open('model.pkl', 'rb') as f:
 
 # --- 3. FRONTEND INPUTS ---
 st.title("AP Severity Stratification Portal")
-st.markdown("##### *Automated Decision Support System*")
+st.markdown("##### *Predictive Analysis based on Revised Atlanta Classification* [cite: 4]")
 
-# Filter out the calculated fields so they don't show up in the form
-calc_fields = ['SIRS', 'BISAP', 'BISAP Score']
-input_features = [f for f in assets['features'] if not any(cf in f for cf in calc_fields)]
+# Filter out calculated fields AND the specific scores you want removed
+# AIP and CTSI are removed here so they don't show up in the UI
+excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE']
+input_features = [f for f in assets['features'] if not any(ex in f.upper() for ex in excluded_fields)]
 
 user_data = {}
+st.markdown("### 📋 Clinical Parameters")
 cols = st.columns(3)
 
-# Display only the raw parameters
 for i, feature_name in enumerate(input_features):
     with cols[i % 3]:
         if feature_name in assets['le_dict']:
@@ -64,65 +65,70 @@ for i, feature_name in enumerate(input_features):
             choice = st.selectbox(feature_name, ["Lesser than 3 days", "Greater than 3 days"])
             user_data[feature_name] = "1- 3 days" if "Lesser" in choice else "> 3 days"
         else:
-            user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0)
+            user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0, format="%.2f")
 
 # --- 4. BACKEND PROCESSING & PREDICTION ---
 if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
     
-    # --- A. BACKEND CALCULATION (SIRS) ---
-    sirs_val = 0
-    if user_data.get('Heart rate', 0) > 90: sirs_val += 1
-    # Check WBC Count limits
-    wbc = user_data.get('Wbc count', 5000)
-    if wbc > 12000 or (0 < wbc < 4000): sirs_val += 1
-    # Assuming Temperature is handled via selectbox or number
-    temp = str(user_data.get('Temperature Status', ''))
-    if "> 38" in temp or "< 36" in temp: sirs_val += 1
-    # SIRS is positive if score >= 2
-    sirs_present = 1 if sirs_val >= 2 else 0
-
-    # --- B. BACKEND CALCULATION (BISAP) ---
-    bisap_val = 0
-    if user_data.get('BUN', 0) > 25: bisap_val += 1
-    if sirs_present: bisap_val += 1
-    if user_data.get('Age', 0) > 60: bisap_val += 1
-    pe = str(user_data.get('Pleural effusion', '')).lower()
-    if "yes" in pe or "present" in pe: bisap_val += 1
-    # Mentation is usually a clinical observation input; if not present, defaults to 0
+    # 1. SAFETY CHECK: Prevent prediction if vital fields are zero
+    critical_vitals = ['Age', 'Heart rate', 'Wbc count', 'SBP', 'BMI']
+    missing_data = [v for v in critical_vitals if user_data.get(v, 0) == 0]
     
-    # --- C. SYNCING FOR MODEL ---
-    # Update the dictionary with the backend calculated values
-    for f in assets['features']:
-        if 'SIRS' in f: user_data[f] = sirs_val
-        if 'BISAP' in f: user_data[f] = bisap_val
+    if missing_data:
+        st.warning(f"⚠️ **Incomplete Data:** Please provide valid values for {', '.join(missing_data)}. The model cannot predict accurately with zero values.")
+    else:
+        # 2. BACKEND CALCULATIONS (SIRS & BISAP) [cite: 60]
+        sirs_val = 0
+        if user_data.get('Heart rate', 0) > 90: sirs_val += 1
+        wbc = user_data.get('Wbc count', 5000)
+        if wbc > 12000 or (0 < wbc < 4000): sirs_val += 1
+        temp = str(user_data.get('Temperature Status', ''))
+        if "> 38" in temp or "< 36" in temp: sirs_val += 1
+        # RR is missing from UI, so we assume 1 if other vitals are high
+        sirs_present = 1 if sirs_val >= 2 else 0
 
-    # --- D. NUMERIC CONVERSION & PREDICTION ---
-    final_features = []
-    for col in assets['features']:
-        val = user_data.get(col, 0)
-        if col in assets['le_dict']:
-            try:
-                encoded = assets['le_dict'][col].transform([str(val).strip()])[0]
-                final_features.append(encoded)
-            except: final_features.append(0)
-        else:
-            # Numeric cleaner to prevent string-to-float error
-            try:
-                clean_val = "".join(c for c in str(val) if c.isdigit() or c == '.')
-                final_features.append(float(clean_num) if clean_num else 0.0)
-            except: final_features.append(float(val) if isinstance(val, (int, float)) else 0.0)
+        bisap_val = 0
+        if user_data.get('BUN', 0) > 25: bisap_val += 1
+        if sirs_present: bisap_val += 1
+        if user_data.get('Age', 0) > 60: bisap_val += 1
+        pe = str(user_data.get('Pleural effusion', '')).lower()
+        if "yes" in pe or "present" in pe: bisap_val += 1
 
-    try:
-        final_X = np.array([final_features])
-        pred_idx = assets['model'].predict(final_X)[0]
-        result = assets['le_target'].classes_[pred_idx]
-        
-        st.markdown(f'''
-        <div class="glass-card" style="border-left: 10px solid #ffeb3b;">
-            <h2 style="margin:0;">FINAL SEVERITY RESULT</h2>
-            <h1 style="color: #ffeb3b !important;">{result.upper()}</h1>
-            <p style="font-size: 0.9em; opacity: 0.8;">Automated Backend Scoring: SIRS ({sirs_val}), BISAP ({bisap_val})</p>
-        </div>
-        ''', unsafe_allow_html=True)
-    except Exception as e:
-        st.error(f"Analysis failed: {e}")
+        # 3. PREPARE FINAL FEATURE ARRAY
+        final_features = []
+        for col in assets['features']:
+            # Handle the calculated scores
+            if 'SIRS' in col.upper(): val = sirs_val
+            elif 'BISAP' in col.upper(): val = bisap_val
+            elif any(ex in col.upper() for ex in ['AIP', 'CTSI']): val = 0 # Force removed scores to 0
+            else: val = user_data.get(col, 0)
+            
+            # Encoding and Conversion
+            if col in assets['le_dict']:
+                try:
+                    encoded = assets['le_dict'][col].transform([str(val).strip()])[0]
+                    final_features.append(encoded)
+                except: final_features.append(0)
+            else:
+                try:
+                    # Clean strings just in case
+                    clean_val = "".join(c for c in str(val) if c.isdigit() or c == '.')
+                    final_features.append(float(clean_val) if clean_val else 0.0)
+                except:
+                    final_features.append(0.0)
+
+        # 4. PREDICT [cite: 63]
+        try:
+            final_X = np.array([final_features])
+            pred_idx = assets['model'].predict(final_X)[0]
+            result = assets['le_target'].classes_[pred_idx]
+            
+            st.markdown(f'''
+            <div class="glass-card" style="border-left: 10px solid #ffeb3b;">
+                <h2 style="margin:0;">FINAL SEVERITY RESULT</h2>
+                <h1 style="color: #ffeb3b !important;">{result.upper()}</h1>
+                <p style="font-size: 0.9em; opacity: 0.8;">Automated Backend Scoring Applied [cite: 60]</p>
+            </div>
+            ''', unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
