@@ -63,7 +63,7 @@ input_features = [f for f in assets['features'] if not any(cf in f for cf in cal
 
 user_data = {}
 
-st.markdown("### 📋 Clinical Parameters (Full Dataset)")
+st.markdown("### 📋 Clinical Parameters")
 cols = st.columns(3)
 
 for i, feature_name in enumerate(input_features):
