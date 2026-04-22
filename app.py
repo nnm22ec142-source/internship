@@ -3,7 +3,6 @@ import base64
 import pandas as pd
 import pickle
 import os
-import random
 import numpy as np
 
 # --- 1. BACKGROUND & STYLE ---
@@ -40,7 +39,7 @@ apply_custom_design('background.jpg')
 
 # --- 2. HEADER ---
 st.title("Acute Pancreatitis Severity Stratification")
-st.markdown("##### *Comprehensive Predictive Analysis (All Dataset Parameters)*")
+st.markdown("##### *Predictive Analysis based on Revised Atlanta Classification*")
 
 # Load Model Assets
 if not os.path.exists('model.pkl'):
@@ -51,84 +50,84 @@ with open('model.pkl', 'rb') as f:
     assets = pickle.load(f)
 
 # --- 3. DYNAMIC INPUT GENERATION ---
-# This dictionary will store all user inputs based on the Excel headers
 user_data = {}
+st.markdown("### 📋 Clinical Parameters")
 
-st.markdown("### 📋 Clinical Parameters (Full Dataset)")
+# We separate 'Calculated' features to handle them specifically
+calculated_features = ['SIRS', 'BISAP', 'BISAP Score'] 
+base_features = [f for f in assets['features'] if not any(cf in f for cf in calculated_features)]
 
-# Create a 3-column layout to handle many inputs efficiently
 cols = st.columns(3)
-
-# Loop through every feature present in the trained model/Excel sheet
-for i, feature_name in enumerate(assets['features']):
+for i, feature_name in enumerate(base_features):
     with cols[i % 3]:
-        # A. Handle Categorical Columns (if present in LabelEncoder dictionary)
         if feature_name in assets['le_dict']:
-            options = assets['le_dict'][feature_name].classes_
-            user_data[feature_name] = st.selectbox(
-                f"{feature_name}", 
-                options, 
-                key=f"select_{feature_name}"
-            )
-        
-        # B. Handle Duration (Special logic from your original code if needed)
+            user_data[feature_name] = st.selectbox(feature_name, assets['le_dict'][feature_name].classes_)
         elif "duration" in feature_name.lower():
-            durations = ["Lesser than 3 days", "Greater than 3 days"]
-            choice = st.selectbox(feature_name, durations, key="dur_choice")
+            choice = st.selectbox(feature_name, ["Lesser than 3 days", "Greater than 3 days"])
             user_data[feature_name] = "1- 3 days" if "Lesser" in choice else "> 3 days"
-            
-        # C. Handle Numeric Columns
         else:
-            # Check if feature name suggests a whole number or float
-            if any(x in feature_name.lower() for x in ['age', 'count', 'platelet', 'rate', 'sbp']):
-                user_data[feature_name] = st.number_input(
-                    feature_name, 
-                    min_value=0, 
-                    value=0, 
-                    step=1,
-                    key=f"num_{feature_name}"
-                )
-            else:
-                user_data[feature_name] = st.number_input(
-                    feature_name, 
-                    min_value=0.0, 
-                    value=0.0, 
-                    format="%.2f",
-                    key=f"num_{feature_name}"
-                )
+            user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0)
 
-# --- 4. PREDICTION LOGIC ---
+# --- 4. INTERACTIVE SCORING CALCULATOR ---
+st.markdown("### 🧮 Clinical Scoring Calculator")
+with st.expander("Calculate SIRS & BISAP Scores", expanded=True):
+    sc1, sc2 = st.columns(2)
+    
+    with sc1:
+        st.write("**SIRS Criteria**")
+        # RR and PaCO2 are often not in the main feature set but needed for the score
+        sirs_rr = st.checkbox("Respiratory Rate > 20/min OR PaCO2 < 32 mmHg")
+        
+        # Calculate SIRS automatically from existing inputs
+        sirs_score = 0
+        if user_data.get('Heart rate', 0) > 90: sirs_score += 1
+        if user_data.get('Wbc count', 0) > 12000 or (user_data.get('Wbc count', 9999) < 4000 and user_data.get('Wbc count', 0) > 0): sirs_score += 1
+        if sirs_rr: sirs_score += 1
+        
+        # Check Temp if it's a categorical selectbox
+        temp_val = user_data.get('Temperature', '')
+        if isinstance(temp_val, str) and ('> 38' in temp_val or '< 36' in temp_val): sirs_score += 1
+        
+        st.info(f"Calculated SIRS Score: **{sirs_score}** (SIRS Present: {'Yes' if sirs_score >= 2 else 'No'})")
+
+    with sc2:
+        st.write("**BISAP Components**")
+        bisap_gcs = st.checkbox("Impaired Mental Status (GCS < 15)")
+        
+        # Calculate BISAP automatically
+        bisap_val = 0
+        if user_data.get('BUN', 0) > 25: bisap_val += 1
+        if bisap_gcs: bisap_val += 1
+        if sirs_score >= 2: bisap_val += 1
+        if user_data.get('Age', 0) > 60: bisap_val += 1
+        
+        pe_val = user_data.get('Pleural effusion', '')
+        if isinstance(pe_val, str) and 'yes' in pe_val.lower(): bisap_val += 1
+        
+        st.info(f"Calculated BISAP Score: **{bisap_val}**")
+
+# Update user_data with the calculated scores for the model
+for f in assets['features']:
+    if 'SIRS' in f: user_data[f] = sirs_score
+    if 'BISAP' in f: user_data[f] = bisap_val
+
+# --- 5. PREDICTION ---
 st.markdown("---")
 if st.button("RUN ANALYSIS", use_container_width=True):
-    # 1. Check for zeros in key vital fields (Adjust list as per your Excel headers)
-    vitals_to_validate = [f for f in assets['features'] if any(v in f.lower() for v in ['age', 'bmi', 'calcium', 'amylase'])]
-    zeros = [k for k in vitals_to_validate if user_data.get(k, 0) <= 0]
-    
-    if zeros:
-        st.warning(f"Note: Some parameters are zero ({', '.join(zeros[:3])}...). Proceeding with analysis.")
-
-    # 2. Preprocessing and Encoding
+    # Map and Encode
     final_features = []
     for col in assets['features']:
-        val = user_data[col]
-        
+        val = user_data.get(col, 0)
         if col in assets['le_dict']:
-            text_val = str(val).strip()
             try:
-                if text_val in assets['le_dict'][col].classes_:
-                    encoded_val = assets['le_dict'][col].transform([text_val])[0]
-                else:
-                    encoded_val = 0
+                encoded_val = assets['le_dict'][col].transform([str(val).strip()])[0]
                 final_features.append(encoded_val)
             except:
                 final_features.append(0)
         else:
-            try:
-                final_features.append(float(val))
-            except:
-                final_features.append(0.0)
+            final_features.append(float(val))
 
-    # 3. Predict
+    # Predict
     final_X = np.array([final_features])
     try:
         pred_idx = assets['model'].predict(final_X)[0]
@@ -138,8 +137,8 @@ if st.button("RUN ANALYSIS", use_container_width=True):
         <div class="glass-card" style="text-align: center; border-left: 10px solid #ff4b4b;">
             <h2 style="margin:0;">PREDICTED SEVERITY</h2>
             <h1 style="font-size: 3.5em; color: #ffeb3b !important;">{result.upper()}</h1>
-            <p>Analysis based on All Dataset Parameters</p>
+            <p>Calculated using Random Forest Ensemble [cite: 63]</p>
         </div>
         ''', unsafe_allow_html=True)
     except Exception as e:
-        st.error(f"Prediction Error: {e}")
+        st.error(f"Error: {e}")
