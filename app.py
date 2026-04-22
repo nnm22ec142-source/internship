@@ -3,6 +3,7 @@ import base64
 import pandas as pd
 import pickle
 import os
+import random
 import numpy as np
 
 # --- 1. BACKGROUND & STYLE ---
@@ -32,104 +33,133 @@ def apply_custom_design(image_file):
             padding: 30px; margin-top: 20px;
         }}
         h1, h2, h3, h5, p, label {{ color: white !important; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); }}
+        .stExpander {{ background: rgba(0, 0, 0, 0.2); border-radius: 10px; }}
         </style>
     ''', unsafe_allow_html=True)
 
+# Ensure you have a background.jpg in your directory
 apply_custom_design('background.jpg')
 
-# --- 2. HEADER ---
-st.title("Acute Pancreatitis Severity Stratification")
-st.markdown("##### *Predictive Analysis based on Revised Atlanta Classification*")
+# --- 2. HEADER & ASSET LOADING ---
+col_t, col_l = st.columns([4, 1])
+with col_t:
+    st.title("Acute Pancreatitis Severity Stratification")
+    st.markdown("##### *Predictive Analysis based on Revised Atlanta Classification*")
+with col_l:
+    if os.path.exists("logo.png"): st.image("logo.png", width=120)
 
-# Load Model Assets
 if not os.path.exists('model.pkl'):
-    st.error("Model file not found.")
+    st.error("Model file (model.pkl) not found. Please ensure it is in the root directory.")
     st.stop()
 
 with open('model.pkl', 'rb') as f:
     assets = pickle.load(f)
 
 # --- 3. DYNAMIC INPUT GENERATION ---
+# Features to handle via calculator rather than manual input
+calc_fields = ['SIRS', 'BISAP', 'BISAP Score']
+# Filter out the calculated fields from the main loop
+input_features = [f for f in assets['features'] if not any(cf in f for cf in calc_fields)]
+
 user_data = {}
-st.markdown("### 📋 Clinical Parameters")
 
-# We separate 'Calculated' features to handle them specifically
-calculated_features = ['SIRS', 'BISAP', 'BISAP Score'] 
-base_features = [f for f in assets['features'] if not any(cf in f for cf in calculated_features)]
-
+st.markdown("### 📋 Clinical Parameters (Full Dataset)")
 cols = st.columns(3)
-for i, feature_name in enumerate(base_features):
+
+for i, feature_name in enumerate(input_features):
     with cols[i % 3]:
+        # Handle Categorical Data
         if feature_name in assets['le_dict']:
-            user_data[feature_name] = st.selectbox(feature_name, assets['le_dict'][feature_name].classes_)
+            user_data[feature_name] = st.selectbox(
+                feature_name, 
+                assets['le_dict'][feature_name].classes_,
+                key=f"select_{feature_name}"
+            )
+        # Handle Duration logic
         elif "duration" in feature_name.lower():
-            choice = st.selectbox(feature_name, ["Lesser than 3 days", "Greater than 3 days"])
+            choice = st.selectbox(feature_name, ["Lesser than 3 days", "Greater than 3 days"], key="dur")
             user_data[feature_name] = "1- 3 days" if "Lesser" in choice else "> 3 days"
+        # Handle Numeric Data
         else:
-            user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0)
+            # Detect if it should be an integer or float
+            if any(x in feature_name.lower() for x in ['age', 'count', 'platelet', 'rate', 'sbp']):
+                user_data[feature_name] = st.number_input(feature_name, min_value=0, value=0, step=1, key=f"num_{feature_name}")
+            else:
+                user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0, format="%.2f", key=f"num_{feature_name}")
 
-# --- 4. INTERACTIVE SCORING CALCULATOR ---
-st.markdown("### 🧮 Clinical Scoring Calculator")
-with st.expander("Calculate SIRS & BISAP Scores", expanded=True):
-    sc1, sc2 = st.columns(2)
-    
-    with sc1:
-        st.write("**SIRS Criteria**")
-        # RR and PaCO2 are often not in the main feature set but needed for the score
-        sirs_rr = st.checkbox("Respiratory Rate > 20/min OR PaCO2 < 32 mmHg")
+# --- 4. SCORING CALCULATOR ---
+st.markdown("### 🧮 Integrated Clinical Scores")
+with st.expander("SIRS & BISAP Criteria Calculator", expanded=True):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**SIRS Logic**")
+        sirs_rr = st.checkbox("Resp Rate > 20/min or PaCO2 < 32 mmHg")
         
-        # Calculate SIRS automatically from existing inputs
-        sirs_score = 0
-        if user_data.get('Heart rate', 0) > 90: sirs_score += 1
-        if user_data.get('Wbc count', 0) > 12000 or (user_data.get('Wbc count', 9999) < 4000 and user_data.get('Wbc count', 0) > 0): sirs_score += 1
-        if sirs_rr: sirs_score += 1
+        # Auto-calculate SIRS
+        s_score = 0
+        if user_data.get('Heart rate', 0) > 90: s_score += 1
+        if user_data.get('Wbc count', 0) > 12000 or (0 < user_data.get('Wbc count', 5000) < 4000): s_score += 1
+        if sirs_rr: s_score += 1
         
-        # Check Temp if it's a categorical selectbox
-        temp_val = user_data.get('Temperature', '')
-        if isinstance(temp_val, str) and ('> 38' in temp_val or '< 36' in temp_val): sirs_score += 1
-        
-        st.info(f"Calculated SIRS Score: **{sirs_score}** (SIRS Present: {'Yes' if sirs_score >= 2 else 'No'})")
+        temp_val = str(user_data.get('Temperature', ''))
+        if "> 38" in temp_val or "< 36" in temp_val: s_score += 1
+        st.info(f"Current SIRS Score: {s_score}")
 
-    with sc2:
-        st.write("**BISAP Components**")
-        bisap_gcs = st.checkbox("Impaired Mental Status (GCS < 15)")
+    with c2:
+        st.write("**BISAP Logic**")
+        gcs_impaired = st.checkbox("Impaired Mental Status (GCS < 15)")
         
-        # Calculate BISAP automatically
-        bisap_val = 0
-        if user_data.get('BUN', 0) > 25: bisap_val += 1
-        if bisap_gcs: bisap_val += 1
-        if sirs_score >= 2: bisap_val += 1
-        if user_data.get('Age', 0) > 60: bisap_val += 1
+        # Auto-calculate BISAP
+        b_score = 0
+        if user_data.get('BUN', 0) > 25: b_score += 1
+        if gcs_impaired: b_score += 1
+        if s_score >= 2: b_score += 1
+        if user_data.get('Age', 0) > 60: b_score += 1
         
-        pe_val = user_data.get('Pleural effusion', '')
-        if isinstance(pe_val, str) and 'yes' in pe_val.lower(): bisap_val += 1
-        
-        st.info(f"Calculated BISAP Score: **{bisap_val}**")
+        pe_val = str(user_data.get('Pleural effusion', '')).lower()
+        if "yes" in pe_val or "present" in pe_val: b_score += 1
+        st.info(f"Current BISAP Score: {b_score}")
 
-# Update user_data with the calculated scores for the model
+# Sync calculated scores back to the feature list
 for f in assets['features']:
-    if 'SIRS' in f: user_data[f] = sirs_score
-    if 'BISAP' in f: user_data[f] = bisap_val
+    if 'SIRS' in f: user_data[f] = s_score
+    if 'BISAP' in f: user_data[f] = b_score
 
-# --- 5. PREDICTION ---
+# --- 5. PREDICTION LOGIC ---
 st.markdown("---")
 if st.button("RUN ANALYSIS", use_container_width=True):
-    # Map and Encode
     final_features = []
+    
     for col in assets['features']:
         val = user_data.get(col, 0)
+        
+        # Handle Categorical Encoding
         if col in assets['le_dict']:
             try:
-                encoded_val = assets['le_dict'][col].transform([str(val).strip()])[0]
+                text_val = str(val).strip()
+                if text_val in assets['le_dict'][col].classes_:
+                    encoded_val = assets['le_dict'][col].transform([text_val])[0]
+                else:
+                    encoded_val = 0
                 final_features.append(encoded_val)
             except:
                 final_features.append(0)
+        
+        # Handle Numeric Conversion (The Fix for your Error)
         else:
-            final_features.append(float(val))
+            try:
+                if isinstance(val, str):
+                    # Strip everything except numbers and decimals
+                    clean_num = "".join(c for c in val if c.isdigit() or c == '.')
+                    final_features.append(float(clean_num) if clean_num else 0.0)
+                else:
+                    final_features.append(float(val))
+            except (ValueError, TypeError):
+                final_features.append(0.0)
 
-    # Predict
-    final_X = np.array([final_features])
+    # Execute Prediction
     try:
+        final_X = np.array([final_features])
         pred_idx = assets['model'].predict(final_X)[0]
         result = assets['le_target'].classes_[pred_idx]
         
@@ -137,8 +167,8 @@ if st.button("RUN ANALYSIS", use_container_width=True):
         <div class="glass-card" style="text-align: center; border-left: 10px solid #ff4b4b;">
             <h2 style="margin:0;">PREDICTED SEVERITY</h2>
             <h1 style="font-size: 3.5em; color: #ffeb3b !important;">{result.upper()}</h1>
-            <p>Calculated using Random Forest Ensemble [cite: 63]</p>
+            <p>Based on 32-parameter Random Forest Analysis & Revised Atlanta Classification</p>
         </div>
         ''', unsafe_allow_html=True)
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Prediction failed: {e}")
