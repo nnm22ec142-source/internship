@@ -51,7 +51,7 @@ st.markdown("##### *Predictive Analysis Dashboard*")
 st.markdown("### 📋 Clinical Parameters")
 cols = st.columns(3)
 
-# 100% hardcoded rendering sequence requested by the user
+# 1. Your strict base rendering sequence
 explicit_ui_order = [
     "TEMPERATURE",
     "HEART RATE",
@@ -78,31 +78,74 @@ explicit_ui_order = [
     "CHEST XRAY"
 ]
 
+# Create a normalized lookup map of your strict order list for comparison
+normalized_explicit = {
+    "temp": "TEMPERATURE", "heart": "HEART RATE", "respiratory": "RESPIRATORY RATE", 
+    "glucose": "BLOOD GLUCOSE LEVEL", "wbc": "WBC", "hct": "HCT", "platelet": "PLATELET", 
+    "tb": "TB", "db": "DB", "ast": "AST", "alt": "ALT", "bun": "BUN", 
+    "creatinine": "S.CREATININE", "ldh": "LDH", "na": "Na", "k": "K", "ca": "Ca", 
+    "triglyceride": "TRIGLYCERIDES", "hdl": "HDL", "ldl": "LDL", "amylase": "SERUM AMYLASE", 
+    "lipase": "SERUM LIPASE", "effusion": "CHEST XRAY", "xray": "CHEST XRAY", "x-ray": "CHEST XRAY"
+}
+
+# 2. Identify and filter remaining backend fields that are NOT in your sequence or exclusions
+excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE', 'ALBUMIN', 'CRP']
+remaining_backend_features = []
+
+for raw_feat in assets['features']:
+    feat_upper = raw_feat.upper()
+    # Check if field is completely excluded
+    if any(ex in feat_upper for ex in excluded_fields):
+        continue
+    # Check if field matches something already covered in your explicit sequence
+    matched_explicit = any(k in raw_feat.lower() for k in normalized_explicit.keys())
+    if not matched_explicit:
+        remaining_backend_features.append(raw_feat)
+
+# 3. Combine both lists: Your explicit order first, then any extra features appended after
+final_ui_render_list = list(explicit_ui_order) + remaining_backend_features
+
 user_inputs = {}
 
-# Loop strictly through your requested list to build the UI columns row-by-row
-for i, display_name in enumerate(explicit_ui_order):
+# Loop sequentially through the combined list to render fields in order
+for i, display_name in enumerate(final_ui_render_list):
     with cols[i % 3]:
+        # Handle explicitly requested items
         if display_name == "TEMPERATURE":
-            # Check if model has a custom categorical encoder for Temperature
             matching_key = next((f for f in assets['le_dict'] if "temp" in f.lower()), None)
             choices = assets['le_dict'][matching_key].classes_ if matching_key else ["< 36", "36 - 38", "> 38"]
             user_inputs[display_name] = st.selectbox("Temperature Status", choices)
             
         elif display_name == "CHEST XRAY":
-            # Map Chest Xray directly to Pleural Effusion criteria
             matching_key = next((f for f in assets['le_dict'] if "effusion" in f.lower() or "xray" in f.lower()), None)
             choices = assets['le_dict'][matching_key].classes_ if matching_key else ["No", "Yes"]
             user_inputs[display_name] = st.selectbox("Chest X-Ray / Pleural Effusion", choices)
             
+        # Handle remaining appended parameters from the backend metadata dynamically
+        elif display_name in remaining_backend_features:
+            if display_name == 'Etiology':
+                all_etiologies = assets['le_dict']['Etiology'].classes_
+                filtered_etiologies = [e for e in all_etiologies if e not in ['AIP', 'CTSI']]
+                user_inputs[display_name] = st.selectbox("Etiology", filtered_etiologies)
+                
+            elif display_name in assets['le_dict']:
+                user_inputs[display_name] = st.selectbox(display_name, assets['le_dict'][display_name].classes_)
+                
+            elif "duration" in display_name.lower():
+                choice = st.selectbox(display_name, ["Lesser than 3 days", "Greater than 3 days"])
+                user_inputs[display_name] = "1- 3 days" if "Lesser" in choice else "> 3 days"
+                
+            else:
+                user_inputs[display_name] = st.number_input(display_name, min_value=0.0, value=0.0, format="%.2f")
+                
+        # Handle regular numeric explicit fields
         else:
-            # All other lab parameters are treated as clean numerical floats
             user_inputs[display_name] = st.number_input(display_name, min_value=0.0, value=0.0, format="%.2f")
 
 # --- 4. PREDICTION ---
 if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
     
-    # 1. Calculate clinical scoring values behind the scenes
+    # Extract structural scores behind the scenes
     sirs_val = 0
     if user_inputs.get('HEART RATE', 0) > 90: sirs_val += 1
     if user_inputs.get('WBC', 0) > 12000 or (0 < user_inputs.get('WBC', 0) < 4000): sirs_val += 1
@@ -114,20 +157,23 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
     if user_inputs.get('BUN', 0) > 25: bisap_val += 1
     if sirs_val >= 2: bisap_val += 1
     
-    # Check age if your model relies on age (defaults to 0 if not captured in your clean list)
-    age_feature = next((user_inputs[k] for k in user_inputs if "age" in k.lower()), 0)
-    if age_feature > 60: bisap_val += 1
+    # Resolve dynamic Age variations if required by background scoring engines
+    age_val = 0
+    for k, v in user_inputs.items():
+        if "age" in k.lower():
+            age_val = float(v)
+            break
+    if age_val > 60: bisap_val += 1
     
     cxr_str = str(user_inputs.get('CHEST XRAY', '')).lower()
     if "yes" in cxr_str or "present" in cxr_str: bisap_val += 1
 
-    # 2. Re-align user inputs back to the exact feature positions expected by the model
+    # Re-align raw inputs directly to matching indices requested by model assets
     final_features = []
     for col in assets['features']:
         is_calculated = False
         val = 0
         
-        # Catch calculated features
         if 'SIRS' in col.upper():
             val = sirs_val
             is_calculated = True
@@ -135,11 +181,10 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
             val = bisap_val
             is_calculated = True
         elif any(ex in col.upper() for ex in ['AIP', 'CTSI', 'ALBUMIN', 'CRP']):
-            val = 0 # Explicitly zero out dropped/excluded parameters
+            val = 0 
             is_calculated = True
-            
-        # Match user inputs against model features regardless of string case variations
         else:
+            # Map clean strings back to their UI input values safely
             col_clean = col.upper().replace(" COUNT", "").replace(" STATUS", "").replace(" LEVEL", "").strip()
             if "EFFUSION" in col_clean or "XRAY" in col_clean or "X-RAY" in col_clean:
                 val = user_inputs.get("CHEST XRAY", 0)
@@ -151,10 +196,12 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
                 val = user_inputs.get("SERUM AMYLASE", 0)
             elif "CREATININE" in col_clean:
                 val = user_inputs.get("S.CREATININE", 0)
+            elif col in user_inputs:
+                val = user_inputs.get(col, 0)
             else:
                 val = user_inputs.get(col_clean, 0)
 
-        # 3. Handle Label Encoding vs Numbers for the mapped value
+        # Encode and append strings vs pure floats correctly
         if col in assets['le_dict'] and not is_calculated:
             try:
                 encoded = assets['le_dict'][col].transform([str(val).strip()])[0]
@@ -168,7 +215,7 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
             except Exception:
                 final_features.append(0.0)
 
-    # 4. Predict Result
+    # Output prediction card
     try:
         final_X = np.array([final_features])
         pred_idx = assets['model'].predict(final_X)[0]
