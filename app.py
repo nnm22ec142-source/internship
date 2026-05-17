@@ -46,11 +46,31 @@ with open('model.pkl', 'rb') as f:
 
 # --- 3. FRONTEND INPUTS ---
 st.title("AP Severity Stratification Portal")
-st.markdown("##### *Predictive Analysis based on Revised Atlanta Classification*")
+st.markdown("##### *Predictive Analysis Dashboard*")
 
-# Filter out calculated fields and unwanted columns from the general UI
-excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE']
-input_features = [f for f in assets['features'] if not any(ex in f.upper() for ex in excluded_fields)]
+# The precise order requested by the user
+ordered_fields = [
+    'Temperature Status', 'Heart rate', 'Respiratory rate', 'Blood glucose level', 
+    'Wbc count', 'HCT', 'Platelet', 'TB', 'DB', 'AST', 'ALT', 'BUN', 
+    'S.creatinine', 'LDH', 'Na', 'K', 'Ca', 'Triglycerides', 'HDL', 'LDL', 
+    'Serum Amylase', 'Serum Lipase', 'Pleural effusion'
+]
+
+# Check against original features, keeping only valid, non-excluded inputs
+excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE', 'ALBUMIN', 'CRP']
+valid_features = [f for f in assets['features'] if not any(ex in f.upper() for ex in excluded_fields)]
+
+# Reconstruct input features strictly using your provided layout order
+input_features = [f for f in ordered_fields if any(vf.lower() == f.lower() for vf in valid_features)]
+
+# Catch any remaining model features that weren't explicitly covered in your ordered list
+for f in valid_features:
+    if f.lower() not in [o.lower() for o in ordered_fields] and f.lower() != 'etiology':
+        input_features.append(f)
+
+# Keep Etiology at the top level or process natively
+if 'Etiology' in assets['features']:
+    input_features.insert(0, 'Etiology')
 
 user_data = {}
 st.markdown("### 📋 Clinical Parameters")
@@ -58,28 +78,38 @@ cols = st.columns(3)
 
 for i, feature_name in enumerate(input_features):
     with cols[i % 3]:
-        # SPECIAL HANDLING FOR ETIOLOGY
+        # Handle Etiology Selectbox
         if feature_name == 'Etiology':
-            # Get all classes but remove AIP and CTSI
             all_etiologies = assets['le_dict']['Etiology'].classes_
             filtered_etiologies = [e for e in all_etiologies if e not in ['AIP', 'CTSI']]
             user_data[feature_name] = st.selectbox("Etiology", filtered_etiologies)
             
+        # Handle Pleural Effusion / Chest X-Ray
+        elif feature_name.lower() in ['pleural effusion', 'chest xray', 'chest x-ray']:
+            label_name = "Chest X-Ray / Pleural Effusion"
+            choices = assets['le_dict'][feature_name].classes_ if feature_name in assets['le_dict'] else ["No", "Yes"]
+            user_data[feature_name] = st.selectbox(label_name, choices)
+            
+        # Handle Categorical / LabelEncoded Fields
         elif feature_name in assets['le_dict']:
             user_data[feature_name] = st.selectbox(feature_name, assets['le_dict'][feature_name].classes_)
             
+        # Handle Duration Fields
         elif "duration" in feature_name.lower():
             choice = st.selectbox(feature_name, ["Lesser than 3 days", "Greater than 3 days"])
             user_data[feature_name] = "1- 3 days" if "Lesser" in choice else "> 3 days"
             
+        # Handle Numeric Values
         else:
             user_data[feature_name] = st.number_input(feature_name, min_value=0.0, value=0.0, format="%.2f")
 
 # --- 4. PREDICTION ---
 if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
-    # Safety Check for zero values
+    # Safety Check for key vitals
     critical_vitals = ['Age', 'Heart rate', 'Wbc count', 'SBP', 'BMI']
-    missing_data = [v for v in critical_vitals if user_data.get(v, 0) == 0]
+    # Filter critical vitals to only check those present in the model assets
+    vitals_to_check = [v for v in critical_vitals if any(f.lower() == v.lower() for f in assets['features'])]
+    missing_data = [v for v in vitals_to_check if user_data.get(v, 0) == 0]
     
     if missing_data:
         st.warning(f"⚠️ **Incomplete Data:** Please provide valid values for {', '.join(missing_data)}.")
@@ -88,6 +118,7 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
         sirs_val = 0
         if user_data.get('Heart rate', 0) > 90: sirs_val += 1
         if user_data.get('Wbc count', 0) > 12000 or (0 < user_data.get('Wbc count', 0) < 4000): sirs_val += 1
+        
         temp = str(user_data.get('Temperature Status', ''))
         if "> 38" in temp or "< 36" in temp: sirs_val += 1
         
@@ -95,40 +126,62 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
         if user_data.get('BUN', 0) > 25: bisap_val += 1
         if sirs_val >= 2: bisap_val += 1
         if user_data.get('Age', 0) > 60: bisap_val += 1
-        pe = str(user_data.get('Pleural effusion', '')).lower()
-        if "yes" in pe or "present" in pe: bisap_val += 1
+        
+        # Match pleural effusion regardless of whether it's stored as Chest X-ray or Pleural Effusion
+        pe_val = ""
+        for k, v in user_data.items():
+            if "effusion" in k.lower() or "xray" in k.lower() or "x-ray" in k.lower():
+                pe_val = str(v).lower()
+                break
+        if "yes" in pe_val or "present" in pe_val: bisap_val += 1
 
         # Final Feature Preparation
         final_features = []
         for col in assets['features']:
-            if 'SIRS' in col.upper(): val = sirs_val
-            elif 'BISAP' in col.upper(): val = bisap_val
-            # Ensure AIP/CTSI are sent as 0 if they exist in the model features
-            elif any(ex in col.upper() for ex in ['AIP', 'CTSI']): val = 0 
-            else: val = user_data.get(col, 0)
+            is_calculated = False
             
-            if col in assets['le_dict']:
+            # Map calculated variables or fill deleted ones with 0
+            if 'SIRS' in col.upper(): 
+                val = sirs_val
+                is_calculated = True
+            elif 'BISAP' in col.upper(): 
+                val = bisap_val
+                is_calculated = True
+            elif any(ex in col.upper() for ex in ['AIP', 'CTSI', 'ALBUMIN', 'CRP']): 
+                val = 0 
+                is_calculated = True
+            else: 
+                val = user_data.get(col, 0)
+
+            # Route data mapping appropriately
+            if col in assets['le_dict'] and not is_calculated:
                 try:
                     encoded = assets['le_dict'][col].transform([str(val).strip()])[0]
                     final_features.append(encoded)
-                except: final_features.append(0)
+                except Exception: 
+                    final_features.append(0)
             else:
                 try:
                     clean_val = "".join(c for c in str(val) if c.isdigit() or c == '.')
                     final_features.append(float(clean_val) if clean_val else 0.0)
-                except: final_features.append(0.0)
+                except Exception: 
+                    final_features.append(0.0)
 
         # Predict Result
         try:
             final_X = np.array([final_features])
             pred_idx = assets['model'].predict(final_X)[0]
-            result = assets['le_target'].classes_[pred_idx]
+            
+            if 'le_target' in assets and hasattr(assets['le_target'], 'classes_'):
+                result = assets['le_target'].classes_[pred_idx]
+            else:
+                result = str(pred_idx)
             
             st.markdown(f'''
             <div class="glass-card" style="border-left: 10px solid #ffeb3b;">
                 <h2 style="margin:0;">FINAL SEVERITY RESULT</h2>
-                <h1 style="color: #ffeb3b !important;">{result.upper()}</h1>
-                <p style="font-size: 0.9em; opacity: 0.8;">Analysis complete based on Revised Atlanta Classification</p>
+                <h1 style="color: #ffeb3b !important;">{str(result).upper()}</h1>
+                <p style="font-size: 0.9em; opacity: 0.8;">Analysis complete</p>
             </div>
             ''', unsafe_allow_html=True)
         except Exception as e:
