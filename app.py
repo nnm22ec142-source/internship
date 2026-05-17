@@ -88,8 +88,8 @@ normalized_explicit = {
     "lipase": "SERUM LIPASE", "effusion": "CHEST XRAY", "xray": "CHEST XRAY", "x-ray": "CHEST XRAY"
 }
 
-# 2. Identify and filter remaining backend fields that are NOT in your sequence or exclusions
-excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE', 'ALBUMIN', 'CRP']
+# 2. Identify and filter remaining backend fields (Excluding BMI 2)
+excluded_fields = ['SIRS', 'BISAP', 'BISAP Score', 'AIP', 'CTSI', 'SCORE', 'ALBUMIN', 'CRP', 'BMI 2']
 remaining_backend_features = []
 
 for raw_feat in assets['features']:
@@ -102,7 +102,7 @@ for raw_feat in assets['features']:
     if not matched_explicit:
         remaining_backend_features.append(raw_feat)
 
-# 3. Combine both lists: Your explicit order first, then any extra features appended after
+# 3. Combine lists: Your explicit order first, then any extra features (like Age, Etiology, BMI) appended after
 final_ui_render_list = list(explicit_ui_order) + remaining_backend_features
 
 user_inputs = {}
@@ -121,7 +121,7 @@ for i, display_name in enumerate(final_ui_render_list):
             choices = assets['le_dict'][matching_key].classes_ if matching_key else ["No", "Yes"]
             user_inputs[display_name] = st.selectbox("Chest X-Ray / Pleural Effusion", choices)
             
-        # Handle remaining appended parameters from the backend metadata dynamically
+        # Handle remaining appended parameters dynamically
         elif display_name in remaining_backend_features:
             if display_name == 'Etiology':
                 all_etiologies = assets['le_dict']['Etiology'].classes_
@@ -180,7 +180,7 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
         elif 'BISAP' in col.upper():
             val = bisap_val
             is_calculated = True
-        elif any(ex in col.upper() for ex in ['AIP', 'CTSI', 'ALBUMIN', 'CRP']):
+        elif any(ex in col.upper() for ex in ['AIP', 'CTSI', 'ALBUMIN', 'CRP', 'BMI 2']):
             val = 0 
             is_calculated = True
         else:
