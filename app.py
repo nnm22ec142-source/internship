@@ -51,12 +51,13 @@ st.markdown("##### *Predictive Analysis Dashboard*")
 st.markdown("### 📋 Clinical Parameters")
 cols = st.columns(3)
 
-# 1. Primary four parameters requested to be at the absolute start
-primary_four = [
+# 1. Primary parameters locked at the absolute start
+primary_parameters = [
     "Age",
     "Sex",
     "Duration of symptoms",
-    "Etiology"
+    "Etiology",
+    "BMI"
 ]
 
 # 2. Your strict laboratory/vital sequence
@@ -88,7 +89,7 @@ explicit_ui_order = [
 
 # Create a normalized lookup map of all manual layout fields for background matching
 normalized_explicit = {
-    "age": "Age", "sex": "Sex", "gender": "Sex", "duration": "Duration of symptoms", "etiology": "Etiology",
+    "age": "Age", "sex": "Sex", "gender": "Sex", "duration": "Duration of symptoms", "etiology": "Etiology", "bmi": "BMI",
     "temp": "TEMPERATURE", "heart": "HEART RATE", "respiratory": "RESPIRATORY RATE", 
     "glucose": "BLOOD GLUCOSE LEVEL", "wbc": "WBC", "hct": "HCT", "platelet": "PLATELET", 
     "tb": "TB", "db": "DB", "ast": "AST", "alt": "ALT", "bun": "BUN", 
@@ -110,14 +111,14 @@ for raw_feat in assets['features']:
         remaining_backend_features.append(raw_feat)
 
 # 4. Construct complete sequential render list
-final_ui_render_list = primary_four + explicit_ui_order + remaining_backend_features
+final_ui_render_list = primary_parameters + explicit_ui_order + remaining_backend_features
 
 user_inputs = {}
 
 # Render fields strictly in order
 for i, display_name in enumerate(final_ui_render_list):
     with cols[i % 3]:
-        # Handle Primary Top 4 Parameters
+        # Handle Primary Top Parameters
         if display_name == "Age":
             user_inputs[display_name] = st.number_input("Age", min_value=0.0, max_value=120.0, value=0.0, format="%.2f")
             
@@ -135,6 +136,9 @@ for i, display_name in enumerate(final_ui_render_list):
             all_etiologies = assets['le_dict']['Etiology'].classes_ if 'Etiology' in assets['le_dict'] else ["Biliary", "Alcoholic", "Idiopathic"]
             filtered_etiologies = [e for e in all_etiologies if e not in ['AIP', 'CTSI']]
             user_inputs[display_name] = st.selectbox("Etiology", filtered_etiologies)
+            
+        elif display_name == "BMI":
+            user_inputs[display_name] = st.number_input("BMI", min_value=0.0, value=0.0, format="%.2f")
             
         # Handle Explicit Vitals Sequence
         elif display_name == "TEMPERATURE":
@@ -196,9 +200,10 @@ if st.button("RUN CLINICAL ANALYSIS", use_container_width=True):
             col_clean = col.upper().replace(" COUNT", "").replace(" STATUS", "").replace(" LEVEL", "").strip()
             
             # Map clean strings back to their UI variables
-            if col.lower() in ['age', 'sex', 'gender', 'etiology']:
+            if col.lower() in ['age', 'sex', 'gender', 'etiology', 'bmi']:
                 if col.lower() == 'age': val = user_inputs.get("Age", 0)
                 elif col.lower() in ['sex', 'gender']: val = user_inputs.get("Sex", 0)
+                elif col.lower() == 'bmi': val = user_inputs.get("BMI", 0)
                 else: val = user_inputs.get("Etiology", 0)
             elif "duration" in col.lower() or "symptom" in col.lower():
                 val = user_inputs.get("Duration of symptoms", 0)
